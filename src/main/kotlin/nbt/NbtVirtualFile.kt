@@ -21,10 +21,12 @@
 package com.demonwav.mcdev.nbt
 
 import com.demonwav.mcdev.asset.MCDevBundle
-import com.demonwav.mcdev.nbt.editor.CompressionSelection
+import com.demonwav.mcdev.nbt.editor.NbtFormat
 import com.demonwav.mcdev.nbt.editor.NbtToolbar
 import com.demonwav.mcdev.nbt.lang.NbttFile
 import com.demonwav.mcdev.nbt.lang.NbttLanguage
+import com.demonwav.mcdev.nbt.util.LittleEndianDataOutputStream
+import com.demonwav.mcdev.nbt.util.NetworkDataOutputStream
 import com.demonwav.mcdev.util.loggerForTopLevel
 import com.demonwav.mcdev.util.runReadActionAsync
 import com.demonwav.mcdev.util.runWriteTaskLater
@@ -38,6 +40,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
 import com.intellij.testFramework.LightVirtualFile
 import com.intellij.util.ThreeState
+import java.io.DataOutput
 import java.io.DataOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPOutputStream
@@ -48,17 +51,17 @@ fun NbtVirtualFile(backingFile: VirtualFile, project: Project): NbtVirtualFile {
     var language: Language = NbttLanguage
 
     var text: String
-    var compressed: Boolean
+    var nbtFormat: NbtFormat?
     var parseSuccessful: Boolean
 
     try {
-        val (rootCompound, isCompressed) = Nbt.buildTagTree(backingFile.inputStream, TimeUnit.SECONDS.toMillis(10))
+        val (rootCompound, mode) = Nbt.buildTagTree(backingFile.inputStream, TimeUnit.SECONDS.toMillis(10))
         text = rootCompound.toString()
-        compressed = isCompressed
+        nbtFormat = mode
         parseSuccessful = true
     } catch (e: MalformedNbtFileException) {
         text = MCDevBundle("nbt.lang.errors.wrapped_error_message", e.message)
-        compressed = false
+        nbtFormat = null
         parseSuccessful = false
     }
 
@@ -66,7 +69,7 @@ fun NbtVirtualFile(backingFile: VirtualFile, project: Project): NbtVirtualFile {
         language = PlainTextLanguage.INSTANCE
     }
 
-    return NbtVirtualFile(backingFile, project, language, text, compressed, parseSuccessful)
+    return NbtVirtualFile(backingFile, project, language, text, nbtFormat, parseSuccessful)
 }
 
 class NbtVirtualFile(
@@ -74,7 +77,7 @@ class NbtVirtualFile(
     private val project: Project,
     language: Language,
     text: String,
-    val isCompressed: Boolean,
+    val nbtFormat: NbtFormat?,
     val parseSuccessful: Boolean,
 ) : LightVirtualFile(backingFile.name + ".nbtt", language, text), IdeDocumentHistoryImpl.SkipFromDocumentHistory {
 
@@ -129,13 +132,16 @@ class NbtVirtualFile(
             runWriteTaskLater {
                 // just to be safe
                 this.parent.bom = null
-                val filteredStream = when (toolbar.selection) {
-                    CompressionSelection.GZIP -> GZIPOutputStream(this.parent.getOutputStream(requester))
-                    CompressionSelection.UNCOMPRESSED -> this.parent.getOutputStream(requester)
+
+                val dataOuput: DataOutput = when (toolbar.selection) {
+                    NbtFormat.BIG_ENDIAN_GZIP -> DataOutputStream(GZIPOutputStream(this.parent.getOutputStream(requester)))
+                    NbtFormat.BIG_ENDIAN -> DataOutputStream(this.parent.getOutputStream(requester))
+                    NbtFormat.LITTLE_ENDIAN -> LittleEndianDataOutputStream(this.parent.getOutputStream(requester))
+                    NbtFormat.LITTLE_ENDIAN_NETWORK -> NetworkDataOutputStream(this.parent.getOutputStream(requester))
                 }
 
-                DataOutputStream(filteredStream).use { stream ->
-                    rootTag.write(stream)
+                (dataOuput as DataOutputStream).use {
+                    rootTag.write(dataOuput)
                 }
 
                 Notification(

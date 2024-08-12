@@ -22,10 +22,11 @@ package com.demonwav.mcdev.nbt.editor
 
 import com.demonwav.mcdev.asset.MCDevBundle
 
-enum class CompressionSelection(private val selectionNameFunc: () -> String) {
-    GZIP({ MCDevBundle("nbt.compression.gzip") }),
-    UNCOMPRESSED({ MCDevBundle("nbt.compression.uncompressed") }),
-    ;
+enum class NbtFormat(private val selectionNameFunc: () -> String) {
+    LITTLE_ENDIAN_NETWORK({ MCDevBundle("nbt.format.little_network") }),
+    BIG_ENDIAN_GZIP({ MCDevBundle("nbt.format.big_gzip") }),
+    LITTLE_ENDIAN({ MCDevBundle("nbt.format.little") }),
+    BIG_ENDIAN({ MCDevBundle("nbt.format.big") }), ;
 
     override fun toString(): String = selectionNameFunc()
 }

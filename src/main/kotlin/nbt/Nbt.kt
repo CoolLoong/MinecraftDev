@@ -21,36 +21,99 @@
 package com.demonwav.mcdev.nbt
 
 import com.demonwav.mcdev.asset.MCDevBundle
-import com.demonwav.mcdev.nbt.tags.NbtTag
-import com.demonwav.mcdev.nbt.tags.NbtTypeId
-import com.demonwav.mcdev.nbt.tags.RootCompound
-import com.demonwav.mcdev.nbt.tags.TagByte
-import com.demonwav.mcdev.nbt.tags.TagByteArray
-import com.demonwav.mcdev.nbt.tags.TagCompound
-import com.demonwav.mcdev.nbt.tags.TagDouble
-import com.demonwav.mcdev.nbt.tags.TagEnd
-import com.demonwav.mcdev.nbt.tags.TagFloat
-import com.demonwav.mcdev.nbt.tags.TagInt
-import com.demonwav.mcdev.nbt.tags.TagIntArray
-import com.demonwav.mcdev.nbt.tags.TagList
-import com.demonwav.mcdev.nbt.tags.TagLong
-import com.demonwav.mcdev.nbt.tags.TagLongArray
-import com.demonwav.mcdev.nbt.tags.TagShort
-import com.demonwav.mcdev.nbt.tags.TagString
-import java.io.DataInputStream
-import java.io.InputStream
+import com.demonwav.mcdev.nbt.editor.NbtFormat
+import com.demonwav.mcdev.nbt.tags.*
+import com.demonwav.mcdev.nbt.util.LittleEndianDataInputStream
+import com.demonwav.mcdev.nbt.util.NetworkDataInputStream
+import io.netty.buffer.ByteBuf
+import io.netty.buffer.ByteBufInputStream
+import io.netty.buffer.Unpooled
+import java.io.*
+import java.util.*
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipException
 
 object Nbt {
-
-    private fun getActualInputStream(stream: InputStream): Pair<DataInputStream, Boolean> {
-        return try {
-            DataInputStream(GZIPInputStream(stream)) to true
-        } catch (e: ZipException) {
-            stream.reset()
-            DataInputStream(stream) to false
+    private fun judgeDataInput(dataIn: DataInput): Boolean {
+        try {
+            val firstByte = dataIn.readUnsignedByte()//type must be compound_tag
+            val fb = NbtTypeId.getById(firstByte.toByte())
+            if (fb == null || fb != NbtTypeId.COMPOUND) {
+                return false
+            }
+            dataIn.readUTF()//root compound name
+            val secondByte = dataIn.readUnsignedByte()//tag type
+            val sb = NbtTypeId.getById(secondByte.toByte()) ?: return false
+            if (sb == NbtTypeId.END) return false
+            dataIn.readUTF()//tag name
+            dataIn.readTag(sb, System.currentTimeMillis(), 20)
+            return true
+        } catch (e: Throwable) {
+            return false
         }
+    }
+
+    private fun isBedrockLevelDat(dataIn: DataInput): Boolean {
+        val header = ByteArray(4)
+        dataIn.readFully(header)
+        dataIn.skipBytes(4)
+        return header[0].toInt() >= 8 && header[1].toInt() == 0 && header[2].toInt() == 0 && header[3].toInt() == 0
+    }
+
+    private fun getActualInputStream(stream: InputStream): Pair<DataInput, NbtFormat> {
+        var res: DataInput? = null
+        var mode: NbtFormat = NbtFormat.BIG_ENDIAN
+        stream.use {
+            val byteBuf: ByteBuf = Unpooled.wrappedBuffer(stream.readAllBytes())
+            byteBuf.markReaderIndex()
+            val iss: InputStream = try {
+                res = DataInputStream(GZIPInputStream(ByteBufInputStream(byteBuf)))
+                return@use
+            } catch (e: ZipException) {
+                byteBuf.resetReaderIndex()
+                mode = NbtFormat.BIG_ENDIAN_GZIP
+                ByteBufInputStream(byteBuf)
+            }
+
+            byteBuf.markReaderIndex()
+            var input: DataInput = DataInputStream(iss)
+            var r = judgeDataInput(input)
+            if (r) {
+                res = input
+                byteBuf.resetReaderIndex()
+                return@use
+            }
+            byteBuf.resetReaderIndex()
+
+            byteBuf.markReaderIndex()
+            if (!isBedrockLevelDat(input)) {
+                byteBuf.resetReaderIndex()
+            }
+            byteBuf.markReaderIndex()
+            input = LittleEndianDataInputStream(iss)
+            r = judgeDataInput(input)
+            if (r) {
+                res = input
+                byteBuf.resetReaderIndex()
+                mode = NbtFormat.LITTLE_ENDIAN
+                return@use
+            }
+            byteBuf.resetReaderIndex()
+
+            byteBuf.markReaderIndex()
+            input = NetworkDataInputStream(iss)
+            r = judgeDataInput(input)
+            if (r) {
+                res = input
+                byteBuf.resetReaderIndex()
+                mode = NbtFormat.LITTLE_ENDIAN_NETWORK
+                return@use
+            }
+        }
+        if (res == null) {
+            throw MalformedNbtFileException(MCDevBundle("nbt.lang.errors.reading"))
+        }
+        return res!! to mode
     }
 
     /**
@@ -58,13 +121,13 @@ object Nbt {
      * it is finished with it.
      */
     @Throws(MalformedNbtFileException::class)
-    fun buildTagTree(inputStream: InputStream, timeout: Long): Pair<RootCompound, Boolean> {
+    fun buildTagTree(inputStream: InputStream, timeout: Long): Pair<RootCompound, NbtFormat> {
         try {
-            val (stream, isCompressed) = getActualInputStream(inputStream)
+            val (stream, mode) = getActualInputStream(inputStream)
 
-            stream.use {
-                val tagIdByte = stream.readByte()
-                val tagId = NbtTypeId.getById(tagIdByte)
+            (stream as InputStream).use {
+                val tagIdByte = stream.readUnsignedByte()
+                val tagId = NbtTypeId.getById(tagIdByte.toByte())
                     ?: throw MalformedNbtFileException(MCDevBundle("nbt.lang.errors.wrong_tag_id", tagIdByte))
 
                 if (tagId != NbtTypeId.COMPOUND) {
@@ -73,7 +136,7 @@ object Nbt {
 
                 val start = System.currentTimeMillis()
 
-                return RootCompound(stream.readUTF(), stream.readCompoundTag(start, timeout).tagMap) to isCompressed
+                return RootCompound(stream.readUTF(), stream.readCompoundTag(start, timeout).tagMap) to mode
             }
         } catch (e: Throwable) {
             if (e is MalformedNbtFileException) {
@@ -84,10 +147,10 @@ object Nbt {
         }
     }
 
-    private fun DataInputStream.readCompoundTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
+    private fun DataInput.readCompoundTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
         val tagMap = HashMap<String, NbtTag>()
 
-        var tagIdByte = this.readByte()
+        var tagIdByte = this.readUnsignedByte().toByte()
         var tagId =
             NbtTypeId.getById(tagIdByte) ?: run {
                 throw MalformedNbtFileException(MCDevBundle("nbt.lang.errors.wrong_tag_id", tagIdByte))
@@ -97,7 +160,7 @@ object Nbt {
 
             tagMap[name] = this.readTag(tagId, start, timeout)
 
-            tagIdByte = this.readByte()
+            tagIdByte = this.readUnsignedByte().toByte()
             tagId =
                 NbtTypeId.getById(tagIdByte) ?: run {
                     throw MalformedNbtFileException(MCDevBundle("nbt.lang.errors.wrong_tag_id", tagIdByte))
@@ -107,28 +170,28 @@ object Nbt {
         return@checkTimeout TagCompound(tagMap)
     }
 
-    private fun DataInputStream.readByteTag(start: Long, timeout: Long) =
+    private fun DataInput.readByteTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagByte(this.readByte()) }
 
-    private fun DataInputStream.readShortTag(start: Long, timeout: Long) =
+    private fun DataInput.readShortTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagShort(this.readShort()) }
 
-    private fun DataInputStream.readIntTag(start: Long, timeout: Long) =
+    private fun DataInput.readIntTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagInt(this.readInt()) }
 
-    private fun DataInputStream.readLongTag(start: Long, timeout: Long) =
+    private fun DataInput.readLongTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagLong(this.readLong()) }
 
-    private fun DataInputStream.readFloatTag(start: Long, timeout: Long) =
+    private fun DataInput.readFloatTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagFloat(this.readFloat()) }
 
-    private fun DataInputStream.readDoubleTag(start: Long, timeout: Long) =
+    private fun DataInput.readDoubleTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagDouble(this.readDouble()) }
 
-    private fun DataInputStream.readStringTag(start: Long, timeout: Long) =
+    private fun DataInput.readStringTag(start: Long, timeout: Long) =
         checkTimeout(start, timeout) { TagString(this.readUTF()) }
 
-    private fun DataInputStream.readListTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
+    private fun DataInput.readListTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
         val tagIdByte = this.readByte()
         val tagId =
             NbtTypeId.getById(tagIdByte) ?: run {
@@ -146,7 +209,7 @@ object Nbt {
         return@checkTimeout TagList(tagId, list)
     }
 
-    private fun DataInputStream.readByteArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
+    private fun DataInput.readByteArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
         val length = this.readInt()
 
         val bytes = ByteArray(length)
@@ -154,7 +217,7 @@ object Nbt {
         return@checkTimeout TagByteArray(bytes)
     }
 
-    private fun DataInputStream.readIntArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
+    private fun DataInput.readIntArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
         val length = this.readInt()
 
         val ints = IntArray(length) {
@@ -164,7 +227,7 @@ object Nbt {
         return@checkTimeout TagIntArray(ints)
     }
 
-    private fun DataInputStream.readLongArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
+    private fun DataInput.readLongArrayTag(start: Long, timeout: Long) = checkTimeout(start, timeout) {
         val length = this.readInt()
 
         val longs = LongArray(length) {
@@ -174,7 +237,7 @@ object Nbt {
         return@checkTimeout TagLongArray(longs)
     }
 
-    private fun DataInputStream.readTag(tagId: NbtTypeId, start: Long, timeout: Long): NbtTag {
+    private fun DataInput.readTag(tagId: NbtTypeId, start: Long, timeout: Long): NbtTag {
         return when (tagId) {
             NbtTypeId.END -> TagEnd
             NbtTypeId.BYTE -> this.readByteTag(start, timeout)

@@ -30,19 +30,17 @@ import com.intellij.ui.dsl.builder.panel
 
 class NbtToolbar(nbtFile: NbtVirtualFile) {
 
-    private var compressionSelection: CompressionSelection? =
-        if (nbtFile.isCompressed) CompressionSelection.GZIP else CompressionSelection.UNCOMPRESSED
+    private var nbtFormat: NbtFormat? = nbtFile.nbtFormat
 
-    val selection: CompressionSelection
-        get() = compressionSelection!!
+    val selection: NbtFormat get() = nbtFormat!!
 
     lateinit var panel: DialogPanel
 
     init {
         panel = panel {
-            row(MCDevBundle("nbt.compression.file_type.label")) {
-                comboBox(EnumComboBoxModel(CompressionSelection::class.java))
-                    .bindItem(::compressionSelection)
+            row(MCDevBundle("nbt.format.label")) {
+                comboBox(EnumComboBoxModel(NbtFormat::class.java))
+                    .bindItem(::nbtFormat)
                     .enabled(nbtFile.isWritable && nbtFile.parseSuccessful)
                 button(MCDevBundle("nbt.compression.save.button")) {
                     panel.apply()
